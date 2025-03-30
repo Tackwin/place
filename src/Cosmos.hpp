@@ -3,15 +3,6 @@
 #include "SDL3/SDL.h"
 #include "Graphics.hpp"
 
-struct FullscreenQuad {
-	SDL_GPUBuffer* vertex_buffer = nullptr;
-	SDL_GPUTransferBuffer* transfer_buffer = nullptr;
-
-	SDL_GPUFence* upload(SDL_GPUDevice* gpu);
-	void release(SDL_GPUDevice* gpu);
-
-	static FullscreenQuad quad;
-};
 
 struct Cosmos {
 	struct Uniform {

@@ -7,6 +7,7 @@ using i32 = signed int;
 using i64 = signed long long;
 using f32 = float;
 using f64 = double;
+using usz = size_t;
 
 #ifndef SIZE_MAX
 constexpr size_t SIZE_MAX = (size_t)-1;

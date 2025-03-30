@@ -88,6 +88,23 @@ Vector3f normalize(Vector3f v) {
 	};
 }
 
+f32 angle(Vector3f a, Vector3f b) {
+	f32 c = dot(a, b);
+	f32 s = length(cross(a, b));
+
+	if (c < -1)
+		c = -1;
+	if (s < -1)
+		s = -1;
+	if (c > 1)
+		c = 1;
+	if (s > 1)
+		s = 1;
+
+	return atan2f(s, c);
+}
+
+
 Quaternionf Quaternionf::axis_angle(Vector3f axis, f32 angle) {
 	f32 s = sinf(angle / 2);
 	return {

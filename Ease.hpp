@@ -518,6 +518,8 @@ NS::Flags NS::Flags::parse(int argc, char** argv) noexcept {
 			i++;
 			flags.compile_command_path = argv[i];
 			flags.compile_command_path = flags.compile_command_path->lexically_normal();
+			printf("Compile command path: %s\n", argv[i]);
+			printf("Compile command path: %s\n", flags.compile_command_path->generic_string().c_str());
 		}
 		if (strcmp(it, "--state-file") == 0) {
 			if (i + 1 >= argc) continue;
@@ -1503,7 +1505,8 @@ void handle_build(Build& b, NS::States& new_states) noexcept {
 		if (!b.flags.no_compile_commands) {
 			c = compile_command_object({}, b);
 			auto p = b.flags.get_compile_commands_path();
-			if (std::filesystem::is_directory(p)) p /= "compile_commands.json";
+			if (std::filesystem::is_directory(p))
+				p /= "compile_commands.json";
 			c.save_command_json(p);
 		}
 

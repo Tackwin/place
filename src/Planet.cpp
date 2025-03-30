@@ -1,11 +1,16 @@
 #include "Planet.hpp"
 
+#include "Common.hpp"
+#include "Graphics.hpp"
+#include "Maths.hpp"
 #include "Noise.hpp"
+#include "SDL3/SDL_gpu.h"
 #include "imgui/imgui.h"
 
 #include <unordered_map>
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 Planet::Planet() {
 	seed.s[0] = 1234;
@@ -24,8 +29,39 @@ Planet::Planet() {
 		0x33 / 255.f, 0x77 / 255.f, 0x55 / 255.f, 0.f
 	};
 	uniform.palette[(u8)Tile::Kind::PEAK]          = {
+		0x96 / 255.f, 0x99 / 255.f, 0x97 / 255.f, 0.f
+	};
+	uniform.palette[(u8)Tile::Kind::SNOW]          = {
 		0xFF / 255.f, 0xFF / 255.f, 0xFF / 255.f, 0.f
 	};
+	uniform.palette[(u8)Tile::Kind::SNOW_PEAK]          = {
+		0xE4 / 255.f, 0xE4 / 255.f, 0xE4 / 255.f, 0.f
+	};
+	uniform.palette[(u8)Tile::Kind::RAIN_FOREST]          = {
+		0x15 / 255.f, 0x3C / 255.f, 0x28 / 255.f, 0.f
+	};
+	uniform.palette[(u8)Tile::Kind::TUNDRA]          = {
+		0x63 / 255.f, 0x72 / 255.f, 0x50 / 255.f, 0.f
+	};
+	uniform.palette[(u8)Tile::Kind::STEPPE]          = {
+		0x84 / 255.f, 0x8D / 255.f, 0x3E / 255.f, 0.f
+	};
+	uniform.palette[(u8)Tile::Kind::DESERT]          = {
+		0xC7 / 255.f, 0xBB / 255.f, 0x55 / 255.f, 0.f
+	};
+	uniform.palette[(u8)Tile::Kind::ICE]          = {
+		0xC5 / 255.f, 0xDB / 255.f, 0xF1 / 255.f, 0.f
+	};
+}
+
+void Planet::create_pipeline(SDL_GPUDevice* gpu, SDL_GPUTextureFormat format) {
+	mesh.create_pipeline(gpu, format);
+	vector_field.create_pipeline(gpu, format);
+}
+
+void Planet::release(SDL_GPUDevice* gpu) {
+	mesh.release(gpu);
+	vector_field.release(gpu);
 }
 
 void Planet::Mesh::release(SDL_GPUDevice* gpu) {
@@ -242,6 +278,11 @@ void Planet::generate_from_mesh(const Planet::Generation_Param& param) {
 	);
 	find_water(param.water_level, param.peak_level);
 	categorize_tiles();
+	fill_year_temperature();
+	fill_base_pressure();
+	fill_macro_wind();
+	fill_wind_step_to_moutain();
+	fill_humidity();
 }
 
 void Planet::fill_height(size_t octave, f32 roughness, f32 lacunarity) {
@@ -252,13 +293,338 @@ void Planet::fill_height(size_t octave, f32 roughness, f32 lacunarity) {
 
 		Vector3f center = (a + b + c) * (1 / 3.0f);
 		center = center * 0.5f + Vector3f(0.5f, 0.5f, 0.5f);
-		float height = fractal_perlin(center.x, center.y, center.z, octave, roughness, lacunarity);
+		f32 height = fractal_perlin(center.x, center.y, center.z, octave, roughness, lacunarity);
+		height *= 10;
 
 		tiles[i / 3].height = height;
+		min_height = std::min(min_height, height);
+		max_height = std::max(max_height, height);
 	}
 }
 
-SDL_GPUFence* Planet::Mesh::upload(SDL_GPUDevice* gpu) {
+void Planet::fill_year_temperature() {
+	auto p2 = [] (f32 b) -> f32 {
+		return (3 * b * b - 1) / 2;
+	};
+	auto p4 = [] (f32 b) -> f32 {
+		return (35 * b * b * b * b - 30 * b * b + 3) / 8;
+	};
+	auto p6 = [] (f32 b) -> f32 {
+		return (231 * b * b * b * b * b * b - 315 * b * b * b * b + 105 * b * b - 5) / 16;
+	};
+
+	auto sig = [&] (f32 y, f32 b) -> f32 {
+		f32 ret = 1.0f;
+		ret -= 5 * p2(cos(b)) * p2(y) / 8;
+		ret -= 9 * p4(cos(b)) * p4(y) / 64;
+		ret -= 65 * p6(cos(b)) * p6(y) / 1024;
+		return ret;
+	};
+	Vector3f axis = get_rotation_axis();
+
+	for (size_t i = 0; i < tiles.size(); i += 1)
+	{
+		Tile& tile = tiles[i];
+		Vector3f dt = normalize(tile.center);
+		f32 theta = angle(axis, dt);
+		theta = theta - PIf / 2;
+		f32 beta = axial_tilt * DEG_RADf;
+		f32 y = sinf(theta);
+
+		f32 intensity = sig(y, beta);
+		tile.heat_quantity = intensity * 10 + generation_param.average_temperature;
+		intensity += generation_param.average_temperature;
+		f32 dividor = 1.0f;
+		switch (tile.kind)
+		{
+		case Tile::Kind::DEEP_OCEAN:
+			dividor = 1.05;
+			break;
+		case Tile::Kind::SHALLOW_OCEAN:
+			dividor = 1.01;
+			break;
+		case Tile::Kind::BEACH:
+			dividor = 1.005;
+			break;
+		case Tile::Kind::FOREST:
+			dividor = 0.95;
+			break;
+		case Tile::Kind::PEAK:
+			dividor = 1.3;
+			break;
+		case Tile::Kind::COUNT:
+			break;
+		}
+		intensity /= 1 + (dividor - 1) / 75;
+		intensity = 10 * (intensity - generation_param.average_temperature);
+		intensity += generation_param.average_temperature;
+
+		tile.year_temperature = intensity;
+		min_year_temp = std::min(min_year_temp, intensity);
+		max_year_temp = std::max(max_year_temp, intensity);
+	}
+}
+
+void Planet::fill_base_pressure() {
+	f32 min_p = +FLT_MAX;
+	f32 max_p = -FLT_MAX;
+	Vector3f axis = get_rotation_axis();
+	Vector3f zero = get_zero_longitude_axis();
+
+	auto A = [] (f32 x) -> f32 {
+		return std::powf(std::powf(std::sinf(2 * std::abs(x)), 1/3.f), 2.f);
+	};
+	auto B = [] (f32 x) -> f32 {
+		return (0.5 + (1 - std::sinf(x) * std::sinf(x))) / 2;
+	};
+	auto f = [&] (f32 x) -> f32 {
+		return (A(x) + B(x)) / 1.75f;
+	};
+
+	for (size_t i = 0; i < tiles.size(); i += 1) {
+		Tile& tile = tiles[i];
+		Vector3f dt = normalize(tile.center);
+		f32 theta = angle(axis, dt);
+		theta = theta - PIf / 2;
+		f32 y = 1.f - cosf(theta * 6.f);
+		f32 x = cosf(6.f * angle(zero, normalize(dt - axis * dot(dt, axis))));
+
+		f32 t = tile.heat_quantity;
+
+		f32 p = 0.287 * t / 5;
+		f32 factorAlt = std::powf(
+			1 - std::clamp(6.87535f * 0.000001f * 3281 * std::max(tile.height, 0.f), 0.f, 1.f),
+			5.2561f
+		) / 30;
+		f32 factorTilt = f(theta);
+		f32 factorLL = y * ((cos(theta) * cos(theta)) * 0.25f * x + 0.5f);
+		tile.base_pressure = p * factorAlt + factorLL;
+	}
+}
+
+void Planet::fill_macro_wind() {
+	for (size_t i = 0; i < tiles.size(); i += 1)
+	{
+		f32 curr = tiles[i].base_pressure;
+		f32 a = tiles[tiles[i].na].base_pressure;
+		f32 b = tiles[tiles[i].nb].base_pressure;
+		f32 c = tiles[tiles[i].nc].base_pressure;
+
+		Vector3f da = normalize(tiles[tiles[i].na].center - tiles[i].center);
+		Vector3f db = normalize(tiles[tiles[i].nb].center - tiles[i].center);
+		Vector3f dc = normalize(tiles[tiles[i].nc].center - tiles[i].center);
+
+		tiles[i].macro_wind = normalize((curr - a) * da + (curr - b) * db + (curr - c) * dc);
+	}
+}
+
+void Planet::fill_wind_step_to_moutain() {
+	std::vector<size_t> open;
+	std::vector<float> weights;
+
+	f32 max_height = 0.f;
+	for (size_t i = 0; i < tiles.size(); i += 1) {
+		max_height = std::max(max_height, tiles[i].height);
+	}
+
+	f32 peak_height = max_height * 0.25f;
+
+	for (size_t i = 0; i < tiles.size(); i += 1) {
+		Tile& tile = tiles[i];
+
+		open.clear();
+		weights.clear();
+
+		open.push_back(i);
+		weights.resize(tiles.size(), 0.f);
+		weights[i] = 1.f;
+
+		float sum = 0.f;
+
+		size_t cursor = 0;
+		while (cursor < open.size()) {
+			size_t idx = open[cursor];
+			cursor += 1;
+
+			float w = weights[idx];
+			weights[idx] = 0;
+			if (w < 0.01f)
+				continue;
+
+			if (tiles[idx].height > 0 && std::sqrt(tiles[idx].height / max_height) > 0.3f) {
+				sum += w;
+				continue;
+			}
+
+			Vector3f dt = tiles[idx].macro_wind * -1.f;
+			Vector3f da = normalize(tiles[tiles[idx].na].center - tiles[idx].center);
+			Vector3f db = normalize(tiles[tiles[idx].nb].center - tiles[idx].center);
+			Vector3f dc = normalize(tiles[tiles[idx].nc].center - tiles[idx].center);
+
+			float sa = std::max((dot(da, tile.macro_wind) + 0.6f) / 1.6f, 0.f);
+			float sb = std::max((dot(db, tile.macro_wind) + 0.6f) / 1.6f, 0.f);
+			float sc = std::max((dot(dc, tile.macro_wind) + 0.6f) / 1.6f, 0.f);
+			float dsum = sa + sb + sc;
+
+			if (sa > 0) {
+				weights[tiles[idx].na] += w * sa / dsum * 0.975f;
+				open.push_back(tiles[idx].na);
+			}
+			if (sb > 0) {
+				weights[tiles[idx].nb] += w * sb / dsum * 0.975f;
+				open.push_back(tiles[idx].nb);
+			}
+			if (sc > 0) {
+				weights[tiles[idx].nc] += w * sc / dsum * 0.975f;
+				open.push_back(tiles[idx].nc);
+			}
+		}
+
+		tile.wind_step_to_moutain = sum;
+	}
+
+	f32 ma = -FLT_MAX;
+	f32 mi = +FLT_MAX;
+
+	for (size_t i = 0; i < tiles.size(); i += 1) {
+		Tile& tile = tiles[i];
+		ma = std::max(ma, tile.wind_step_to_moutain);
+		mi = std::min(mi, tile.wind_step_to_moutain);
+	}
+
+	for (size_t i = 0; i < tiles.size(); i += 1) {
+		Tile& tile = tiles[i];
+		tile.wind_step_to_moutain = (tile.wind_step_to_moutain - mi) / (ma - mi);
+	}
+}
+
+void Planet::fill_humidity() {
+	std::vector<size_t> open;
+	std::vector<float> weights;
+
+	for (size_t i = 0; i < tiles.size(); i += 1) {
+		Tile& tile = tiles[i];
+
+		open.clear();
+		weights.clear();
+
+		open.push_back(i);
+		weights.resize(tiles.size(), 0.f);
+		weights[i] = 1.f;
+
+		float sum = 0.f;
+
+		size_t cursor = 0;
+		while (cursor < open.size()) {
+			size_t idx = open[cursor];
+			cursor += 1;
+
+			float w = weights[idx];
+			weights[idx] = 0;
+			if (w < 0.01f)
+				continue;
+
+			if (
+				tiles[idx].kind == Tile::Kind::SHALLOW_OCEAN ||
+				tiles[idx].kind == Tile::Kind::DEEP_OCEAN
+			) {
+				sum += w;
+				continue;
+			}
+
+			Vector3f dt = tiles[idx].macro_wind * -1.f;
+			Vector3f da = normalize(tiles[tiles[idx].na].center - tiles[idx].center);
+			Vector3f db = normalize(tiles[tiles[idx].nb].center - tiles[idx].center);
+			Vector3f dc = normalize(tiles[tiles[idx].nc].center - tiles[idx].center);
+
+			float sa = std::max((dot(da, tile.macro_wind) + 0.4f) / 1.4f, 0.f);
+			float sb = std::max((dot(db, tile.macro_wind) + 0.4f) / 1.4f, 0.f);
+			float sc = std::max((dot(dc, tile.macro_wind) + 0.4f) / 1.4f, 0.f);
+			float dsum = sa + sb + sc;
+
+			if (sa > 0) {
+				weights[tiles[idx].na] += w * sa / dsum * 0.95f;
+				open.push_back(tiles[idx].na);
+			}
+			if (sb > 0) {
+				weights[tiles[idx].nb] += w * sb / dsum * 0.95f;
+				open.push_back(tiles[idx].nb);
+			}
+			if (sc > 0) {
+				weights[tiles[idx].nc] += w * sc / dsum * 0.95f;
+				open.push_back(tiles[idx].nc);
+			}
+		}
+
+		tile.humidity = sum;
+	}
+
+	f32 max_hu = -FLT_MAX;
+	f32 min_hu = +FLT_MAX;
+	for (size_t i = 0; i < tiles.size(); i += 1) {
+		Tile& tile = tiles[i];
+		max_hu = std::max(max_hu, tile.humidity);
+		min_hu = std::min(min_hu, tile.humidity);
+	}
+	for (size_t i = 0; i < tiles.size(); i += 1) {
+		Tile& tile = tiles[i];
+		tile.humidity = (tile.humidity - min_hu) / (max_hu - min_hu);
+	}
+
+	for (size_t i = 0; i < tiles.size(); i += 1) {
+		Tile& tile = tiles[i];
+		tile.humidity = (tile.humidity * 0.8 + 0.2) * tile.year_temperature;
+		tile.humidity -= tile.height / 20;
+	}
+
+	if (true) for (size_t j = 0; j < 4; j += 1) {
+		std::vector<float> temp_humidity;
+		temp_humidity.resize(tiles.size());
+
+		for (size_t i = 0; i < tiles.size(); i += 1) {
+			Tile& tile = tiles[i];
+
+			float ha = tiles[tile.na].humidity;
+			float hb = tiles[tile.nb].humidity;
+			float hc = tiles[tile.nc].humidity;
+
+			temp_humidity[i] = (tile.humidity + (ha + hb + hc) / 3.f) / 2.f;
+		}
+
+		for (size_t i = 0; i < tiles.size(); i += 1) {
+			Tile& tile = tiles[i];
+			tile.humidity = temp_humidity[i];
+		}
+	}
+	for (size_t i = 0; i < tiles.size(); i += 1) {
+		Tile& tile = tiles[i];
+		tile.humidity *= ((1.f - std::sqrt(std::sqrt(tile.wind_step_to_moutain))) * 0.5 + 0.25);
+	}
+
+	for (size_t i = 0; i < tiles.size(); i += 1) {
+		Tile& tile = tiles[i];
+		if (
+			tile.kind != Tile::Kind::DEEP_OCEAN &&
+			tile.kind != Tile::Kind::SHALLOW_OCEAN
+		) {
+			max_hu = std::max(max_hu, tile.humidity);
+			min_hu = std::min(min_hu, tile.humidity);
+		}
+	}
+
+	for (size_t i = 0; i < tiles.size(); i += 1) {
+		Tile& tile = tiles[i];
+		if (tile.kind == Tile::Kind::DEEP_OCEAN)
+			tile.humidity = 1.f;
+		else if (tile.kind == Tile::Kind::SHALLOW_OCEAN)
+			tile.humidity = 1.f;
+		else
+			tile.humidity = (tile.humidity - min_hu) / (max_hu - min_hu);
+	}
+}
+
+
+void Planet::Mesh::upload(SDL_GPUDevice* gpu, std::vector<SDL_GPUFence*>& fences) {
 	void* gpu_data = SDL_MapGPUTransferBuffer(gpu, gpu_transfer_buffer, false);
 	memcpy(gpu_data, vertices.data(), vertices.size() * sizeof(*vertices.data()));
 	SDL_UnmapGPUTransferBuffer(gpu, gpu_transfer_buffer);
@@ -281,10 +647,10 @@ SDL_GPUFence* Planet::Mesh::upload(SDL_GPUDevice* gpu) {
 	);
 
 	SDL_EndGPUCopyPass(copy);
-	return SDL_SubmitGPUCommandBufferAndAcquireFence(buffer);
+	fences.push_back(SDL_SubmitGPUCommandBufferAndAcquireFence(buffer));
 }
 
-bool Planet::Mesh::create_pipeline(SDL_GPUDevice* gpu) {
+bool Planet::Mesh::create_pipeline(SDL_GPUDevice* gpu, SDL_GPUTextureFormat format) {
 	SDL_GPUShader* vertex_shader = nullptr;
 	SDL_GPUShader* fragment_shader = nullptr;
 	{
@@ -337,7 +703,7 @@ bool Planet::Mesh::create_pipeline(SDL_GPUDevice* gpu) {
 
 	SDL_GPUColorTargetDescription color_target_desc[] = {
 		{
-			.format = SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT,
+			.format = format,
 		}
 	};
 	SDL_GPUVertexBufferDescription vertex_buffer_desc[] = {
@@ -463,11 +829,6 @@ void Planet::imgui(SDL_GPUDevice* gpu) {
 
 	need_regen |= ImGui::SliderFloat("Plate speed", &generation_param.plate_speed, 0.0f, 10.0f);
 
-	if (need_regen) {
-		generate_icosphere(gpu, order);
-		generate_from_mesh(generation_param);
-	}
-
 	ImGui::SeparatorText("Palette");
 
 	for (size_t i = 0; i < 8; i += 1) {
@@ -478,6 +839,17 @@ void Planet::imgui(SDL_GPUDevice* gpu) {
 		ImGui::ColorEdit3("Color", (f32*)&uniform.palette[i]);
 	}
 
+	bool need_recategorize = false;
+
+	need_recategorize |= ImGui::SliderFloat("Min temp desert °C", &min_temp_desert, 0, 50);
+	need_recategorize |= ImGui::SliderFloat("Max temp tunra °C", &max_temp_tundra, 0, 50);
+	need_recategorize |= ImGui::SliderFloat("Max snow temp °C", &max_snow_temp, 0, 50);
+	need_recategorize |= ImGui::SliderFloat("Max ice temp °C", &max_ice_temp, 0, 50);
+	need_recategorize |= ImGui::SliderFloat("Desert Humi", &humidity_desert, 0, 1);
+	need_recategorize |= ImGui::SliderFloat("Steppe Humi", &humidity_steppe, 0, 1);
+	need_recategorize |= ImGui::SliderFloat("Rainforest Humi", &humidity_rainforest, 0, 1);
+	need_recategorize |= ImGui::SliderFloat("Snow peak factor", &snow_peak_factor, 0, 10);
+
 	ImGui::SeparatorText("Orbit");
 
 	ImGui::SliderFloat("Radius", &radius, 0.1f, 10.0f);
@@ -485,12 +857,26 @@ void Planet::imgui(SDL_GPUDevice* gpu) {
 	ImGui::SliderFloat("Year period", &year_period, 0.1f, 1000.0f);
 	ImGui::SliderFloat("Orbit ecentricity", &orbit_ecentricity, 0.0f, 1.0f);
 	ImGui::SliderFloat("Orbit inclination", &orbit_inclination, 0.0f, 90.0f);
-	ImGui::SliderFloat("Axial tilt", &axial_tilt, 0.0f, 90.0f);
+	need_regen |= ImGui::SliderFloat("Axial tilt", &axial_tilt, 0.0f, 90.0f);
+
 
 	ImGui::SeparatorText("Overlay");
 	{
 		int x = (int)overlay_render;
-		ImGui::Combo("Render", &x, "None\0Height\0Water distance\0Tectionic plates\0");
+		ImGui::Combo(
+			"Render",
+			&x,
+			"None\0"
+			"Height\0"
+			"Water distance\0"
+			"Tectionic plates\0"
+			"Temperature\0"
+			"Pressure\0"
+			"Macro wind\0"
+			"Wind step to moutain\0"
+			"Humidity\0"
+			"HeatQuantity\0"
+		);
 		uniform.overlay = x;
 		overlay_render = (Overlay_Render)x;
 	}
@@ -499,6 +885,16 @@ void Planet::imgui(SDL_GPUDevice* gpu) {
 
 	ImGui::Text("Time: % 5.2f", time);
 	ImGui::Text("Position % 5.2f % 5.2f % 5.2f", position.x, position.y, position.z);
+
+	if (need_regen) {
+		generate_icosphere(gpu, order);
+		generate_from_mesh(generation_param);
+	}
+	if (need_recategorize) {
+		find_water(generation_param.water_level, generation_param.peak_level);
+		categorize_tiles();
+		final_categorize_tiles();
+	}
 }
 
 void Planet::update(f32 dt)
@@ -514,9 +910,7 @@ void Planet::update(f32 dt)
 	f32 t_year = time_year / year_period;
 
 	f32 angle = 2 * PIf * t_day;
-	Vector3f axis = { 0, 0, 1 };
-	Quaternionf q_start_tilt = Quaternionf::axis_angle({ 1, 0, 0 }, axial_tilt * DEG_RADf);
-	axis = q_start_tilt * axis;
+	Vector3f axis = get_rotation_axis();
 	Quaternionf q_day = Quaternionf::axis_angle(axis, angle);
 
 	angle = 2 * PIf * t_year;
@@ -533,6 +927,7 @@ void Planet::update(f32 dt)
 		mesh.vertices[i].palette_index = (u32)tiles[i / 3].kind;
 	}
 
+	render_vector_field = false;
 	switch (overlay_render) {
 		case Overlay_Render::Height: {
 			f32 max_height = -1000;
@@ -558,12 +953,78 @@ void Planet::update(f32 dt)
 			}
 			break;
 		}
-
+		case Overlay_Render::Temperature: {
+			f32 max_t = -FLT_MAX;
+			f32 min_t = +FLT_MAX;
+			for (size_t i = 0; i < tiles.size(); i += 1) {
+				max_t = std::max(max_t, tiles[i].year_temperature);
+				min_t = std::min(min_t, tiles[i].year_temperature);
+			}
+			for (size_t i = 0; i < mesh.vertices.size(); i += 1) {
+				f32 t = tiles[i / 3].year_temperature;
+				mesh.vertices[i].scalar = (t - min_t) / (max_t - min_t);
+			}
+			break;
+		}
 		case Overlay_Render::TectonicPlates: {
 			for (size_t i = 0; i < mesh.vertices.size(); i += 1) {
 				mesh.vertices[i].scalar = tiles[i / 3].plate_index / (f32)generation_param.n_plates;
 			}
 
+			break;
+		}
+		case Overlay_Render::MacroWind:
+			render_vector_field = true;
+		case Overlay_Render::Pressure: {
+			f32 mi = +FLT_MAX;
+			f32 ma = -FLT_MAX;
+			for (size_t i = 0; i < tiles.size(); i += 1) {
+				mi = std::min(tiles[i].base_pressure, mi);
+				ma = std::max(tiles[i].base_pressure, ma);
+			}
+
+			for (size_t i = 0; i < mesh.vertices.size(); i += 1) {
+				mesh.vertices[i].scalar = (tiles[i / 3].base_pressure - mi) / (ma - mi);
+			}
+			break;
+		}
+		case Overlay_Render::WindStepToMoutain: {
+			f32 mi = +FLT_MAX;
+			f32 ma = -FLT_MAX;
+			for (size_t i = 0; i < tiles.size(); i += 1) {
+				mi = std::min(tiles[i].wind_step_to_moutain, mi);
+				ma = std::max(tiles[i].wind_step_to_moutain, ma);
+			}
+
+			for (size_t i = 0; i < mesh.vertices.size(); i += 1) {
+				mesh.vertices[i].scalar = (tiles[i / 3].wind_step_to_moutain - mi) / (ma - mi);
+			}
+			break;
+		}
+		case Overlay_Render::Humidity: {
+			f32 mi = +FLT_MAX;
+			f32 ma = -FLT_MAX;
+			for (size_t i = 0; i < tiles.size(); i += 1) {
+				mi = std::min(tiles[i].humidity, mi);
+				ma = std::max(tiles[i].humidity, ma);
+			}
+
+			for (size_t i = 0; i < mesh.vertices.size(); i += 1) {
+				mesh.vertices[i].scalar = (tiles[i / 3].humidity - mi) / (ma - mi);
+			}
+			break;
+		}
+		case Overlay_Render::HeatQuantity: {
+			f32 mi = +FLT_MAX;
+			f32 ma = -FLT_MAX;
+			for (size_t i = 0; i < tiles.size(); i += 1) {
+				mi = std::min(tiles[i].heat_quantity, mi);
+				ma = std::max(tiles[i].heat_quantity, ma);
+			}
+
+			for (size_t i = 0; i < mesh.vertices.size(); i += 1) {
+				mesh.vertices[i].scalar = (tiles[i / 3].heat_quantity - mi) / (ma - mi);
+			}
 			break;
 		}
 
@@ -572,6 +1033,43 @@ void Planet::update(f32 dt)
 				mesh.vertices[i].scalar = 0.0f;
 			break;
 	}
+}
+
+
+void Planet::upload(SDL_GPUDevice* gpu, std::vector<SDL_GPUFence*>& fences) {
+	if (render_vector_field) {
+		if (!vector_field.vertex_buffer)
+			vector_field.upload(gpu, fences);
+		switch (overlay_render) {
+			case Overlay_Render::MacroWind: {
+				std::vector<WorldArrow::Instance> instances;
+				instances.resize(tiles.size());
+				for (size_t i = 0; i < tiles.size(); i += 1)
+				{
+					WorldArrow::Instance& instance = instances[i];
+					instance.color = Vector3f(1.f, 1.f, 1.f);
+					instance.dir = tiles[i].macro_wind;
+					instance.pos = tiles[i].center * 1.001f;
+					instance.scale = 0.003f;
+					instance.up = normalize(tiles[i].center);
+				}
+				vector_field.set_instances(gpu, instances.data(), instances.size(), fences);
+				break;
+			}
+			case Overlay_Render::None:
+			case Overlay_Render::Height:
+			case Overlay_Render::WaterDistance:
+			case Overlay_Render::TectonicPlates:
+			case Overlay_Render::Temperature:
+			case Overlay_Render::Pressure:
+			case Overlay_Render::WindStepToMoutain:
+			case Overlay_Render::Humidity:
+			case Overlay_Render::HeatQuantity:
+			case Overlay_Render::Count:
+				break;
+		}
+	}
+	mesh.upload(gpu, fences);
 }
 
 void Planet::render(SDL_GPURenderPass* pass, SDL_GPUCommandBuffer* command) {
@@ -591,6 +1089,12 @@ void Planet::render(SDL_GPURenderPass* pass, SDL_GPUCommandBuffer* command) {
 	SDL_PushGPUFragmentUniformData(command, 1, &uniform, sizeof(uniform));
 
 	SDL_DrawGPUPrimitives(pass, mesh.vertices.size(), 1, 0, 0);
+
+	if (render_vector_field)
+	{
+		vector_field.common_uniform = common_uniform;
+		vector_field.render(pass, command);
+	}
 }
 
 
@@ -718,6 +1222,53 @@ void Planet::categorize_tiles() {
 		}
 	}
 }
+
+void Planet::final_categorize_tiles() {
+	for (size_t i = 0; i < tiles.size(); i += 1) {
+		Tile& tile = tiles[i];
+
+		if (tile.kind == Tile::Kind::DEEP_OCEAN){
+			if (tile.year_temperature < max_ice_temp) {
+				tile.kind = Tile::Kind::SNOW;
+			}
+			continue;
+		}
+		if (tile.kind == Tile::Kind::SHALLOW_OCEAN)
+		{
+			if (tile.year_temperature < max_snow_temp) {
+				tile.kind = Tile::Kind::ICE;
+			}
+			continue;
+		}
+		if (tile.year_temperature < max_snow_temp) {
+			tile.kind = Tile::Kind::SNOW;
+			continue;
+		}
+		if (tile.kind == Tile::Kind::BEACH)
+			continue;
+		if (tile.kind == Tile::Kind::PEAK)
+		{
+			if (tile.height * snow_peak_factor > tile.year_temperature)
+				tile.kind = Tile::Kind::SNOW_PEAK;
+			continue;
+		}
+
+		if (tile.humidity < humidity_desert) {
+			if (tile.year_temperature > min_temp_desert) {
+				tile.kind = Tile::Kind::DESERT;
+			} else if (tile.year_temperature < max_temp_tundra) {
+				tile.kind = Tile::Kind::TUNDRA;
+			}
+		}
+		else if (tile.humidity < humidity_steppe) {
+			tile.kind = Tile::Kind::STEPPE;
+		}
+		else if (tile.humidity > humidity_rainforest) {
+			tile.kind = Tile::Kind::RAIN_FOREST;
+		}
+	}
+}
+
 
 void Planet::grow_plates(
 	size_t n_plates, f32 plate_speed, size_t fail_smooth, f32 fail_smooth_factor
@@ -928,4 +1479,22 @@ void Planet::grow_plates(
 	for (size_t i = 0; i < tiles.size(); i += 1) {
 		tiles[i].height += fail_lines_dt[i];
 	}
+}
+
+Vector3f Planet::get_rotation_axis()
+{
+	Vector3f axis = { 0, 0, 1 };
+	Quaternionf q_start_tilt = Quaternionf::axis_angle({ 1, 0, 0 }, axial_tilt * DEG_RADf);
+	axis = q_start_tilt * axis;
+
+	return axis;
+}
+
+Vector3f Planet::get_zero_longitude_axis()
+{
+	Vector3f axis = { 1, 0, 0 };
+	Quaternionf q_start_tilt = Quaternionf::axis_angle({ 1, 0, 0 }, axial_tilt * DEG_RADf);
+	axis = q_start_tilt * axis;
+
+	return axis;
 }

@@ -63,13 +63,13 @@ void main() {
 	vec3 baryd = max(abs(dFdx(barycenter)), abs(dFdy(barycenter)));
 	vec3 baryd_min = min(baryd, 0.1);
 	float baryd_factor = dot(baryd_min / baryd, vec3(1.0 / 3.0));
-	vec3 baryf = smoothstep(baryd_min * 0, baryd_min * 1, barycenter);
+	vec3 baryf = smoothstep(baryd_min * 0, baryd_min * 2, barycenter);
 	float b = min(min(baryf.x, baryf.y), baryf.z);
 
 	color = mix(vec3(0.0), color, min(1.0, b + 1.5 * (1.0 - baryd_factor)));
 
 	if (u_overlay > 0) {
-		color = mix(color, viridis_quintic(scalar), 0.85);
+		color = mix(color, viridis_quintic(scalar), 0.95);
 	}
 	fragColor = vec4(color, 1.0);
 

@@ -43,6 +43,7 @@ Vector3f cross(Vector3f a, Vector3f b);
 f32 dot(Vector3f a, Vector3f b);
 f32 length(Vector3f v);
 Vector3f normalize(Vector3f v);
+f32 angle(Vector3f a, Vector3f b);
 
 std::optional<Vector3f> intersect_sphere_ray(Vector3f o, f32 r, Vector3f p, Vector3f d);
 struct Matrix4f {
